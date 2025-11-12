@@ -7,6 +7,7 @@ use std::slice;
 use hashsig::signature::generalized_xmss::instantiations_sha::lifetime_2_to_the_18::winternitz::SIGWinternitzLifetime18W4;
 use hashsig::signature::{SignatureScheme, SignatureSchemeSecretKey};
 use hashsig::MESSAGE_LENGTH;
+use serde_json;
 
 // Type aliases for convenience
 type SignatureSchemeType = SIGWinternitzLifetime18W4;
@@ -436,6 +437,38 @@ pub unsafe extern "C" fn pq_secret_key_deserialize(
     }
 }
 
+/// Deserialize secret key from JSON
+///
+/// # Parameters
+/// - `json`: pointer to UTF-8 JSON buffer
+/// - `json_len`: buffer size
+/// - `sk_out`: pointer to write secret key (output)
+///
+/// # Returns
+/// Error code
+#[no_mangle]
+pub unsafe extern "C" fn pq_secret_key_from_json(
+    json: *const u8,
+    json_len: usize,
+    sk_out: *mut *mut PQSignatureSchemeSecretKey,
+) -> PQSigningError {
+    if json.is_null() || sk_out.is_null() {
+        return PQSigningError::InvalidPointer;
+    }
+
+    let json_slice = slice::from_raw_parts(json, json_len);
+    match serde_json::from_slice::<SecretKeyType>(json_slice) {
+        Ok(sk) => {
+            let sk_wrapper = Box::new(PQSignatureSchemeSecretKeyInner {
+                inner: Box::new(sk),
+            });
+            *sk_out = Box::into_raw(sk_wrapper) as *mut PQSignatureSchemeSecretKey;
+            PQSigningError::Success
+        }
+        Err(_) => PQSigningError::UnknownError,
+    }
+}
+
 /// Serialize public key to bytes
 ///
 /// # Parameters
@@ -503,6 +536,38 @@ pub unsafe extern "C" fn pq_public_key_deserialize(
     
     match bincode::serde::decode_from_slice(buffer_slice, bincode::config::standard()) {
         Ok((pk, _)) => {
+            let pk_wrapper = Box::new(PQSignatureSchemePublicKeyInner {
+                inner: Box::new(pk),
+            });
+            *pk_out = Box::into_raw(pk_wrapper) as *mut PQSignatureSchemePublicKey;
+            PQSigningError::Success
+        }
+        Err(_) => PQSigningError::UnknownError,
+    }
+}
+
+/// Deserialize public key from JSON
+///
+/// # Parameters
+/// - `json`: pointer to UTF-8 JSON buffer
+/// - `json_len`: buffer size
+/// - `pk_out`: pointer to write public key (output)
+///
+/// # Returns
+/// Error code
+#[no_mangle]
+pub unsafe extern "C" fn pq_public_key_from_json(
+    json: *const u8,
+    json_len: usize,
+    pk_out: *mut *mut PQSignatureSchemePublicKey,
+) -> PQSigningError {
+    if json.is_null() || pk_out.is_null() {
+        return PQSigningError::InvalidPointer;
+    }
+
+    let json_slice = slice::from_raw_parts(json, json_len);
+    match serde_json::from_slice::<PublicKeyType>(json_slice) {
+        Ok(pk) => {
             let pk_wrapper = Box::new(PQSignatureSchemePublicKeyInner {
                 inner: Box::new(pk),
             });

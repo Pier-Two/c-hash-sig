@@ -235,6 +235,10 @@ enum PQSigningError pq_secret_key_deserialize(const uint8_t *buffer,
                                               uintptr_t buffer_len,
                                               struct PQSignatureSchemeSecretKey **sk_out);
 
+enum PQSigningError pq_secret_key_from_json(const uint8_t *json,
+                                            uintptr_t json_len,
+                                            struct PQSignatureSchemeSecretKey **sk_out);
+
 /**
  * Serialize public key to bytes
  *
@@ -272,6 +276,10 @@ enum PQSigningError pq_public_key_serialize(const struct PQSignatureSchemePublic
 enum PQSigningError pq_public_key_deserialize(const uint8_t *buffer,
                                               uintptr_t buffer_len,
                                               struct PQSignatureSchemePublicKey **pk_out);
+
+enum PQSigningError pq_public_key_from_json(const uint8_t *json,
+                                            uintptr_t json_len,
+                                            struct PQSignatureSchemePublicKey **pk_out);
 
 /**
  * Serialize signature to bytes
