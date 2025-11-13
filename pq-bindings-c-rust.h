@@ -24,6 +24,10 @@ typedef enum PQSigningError {
    */
   InvalidMessageLength = 3,
   /**
+   * Epoch outside supported range
+   */
+  InvalidEpoch = 4,
+  /**
    * Unknown error
    */
   UnknownError = 99,
@@ -155,7 +159,7 @@ enum PQSigningError pq_key_gen(uintptr_t activation_epoch,
  * All pointers must be valid
  */
 enum PQSigningError pq_sign(const struct PQSignatureSchemeSecretKey *sk,
-                            uint32_t epoch,
+                            uint64_t epoch,
                             const uint8_t *message,
                             uintptr_t message_len,
                             struct PQSignature **signature_out);
@@ -177,7 +181,7 @@ enum PQSigningError pq_sign(const struct PQSignatureSchemeSecretKey *sk,
  * All pointers must be valid
  */
 int pq_verify(const struct PQSignatureSchemePublicKey *pk,
-              uint32_t epoch,
+              uint64_t epoch,
               const uint8_t *message,
               uintptr_t message_len,
               const struct PQSignature *signature);

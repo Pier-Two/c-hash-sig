@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::ffi::CString;
 use std::ops::Range;
 use std::os::raw::{c_char, c_int};
@@ -80,6 +81,8 @@ pub enum PQSigningError {
     InvalidPointer = 2,
     /// Invalid message length
     InvalidMessageLength = 3,
+    /// Epoch outside supported range
+    InvalidEpoch = 4,
     /// Unknown error
     UnknownError = 99,
 }
@@ -239,7 +242,7 @@ pub unsafe extern "C" fn pq_key_gen(
 #[no_mangle]
 pub unsafe extern "C" fn pq_sign(
     sk: *const PQSignatureSchemeSecretKey,
-    epoch: u32,
+    epoch: u64,
     message: *const u8,
     message_len: usize,
     signature_out: *mut *mut PQSignature,
@@ -252,6 +255,11 @@ pub unsafe extern "C" fn pq_sign(
         return PQSigningError::InvalidMessageLength;
     }
 
+    let epoch32 = match u32::try_from(epoch) {
+        Ok(value) => value,
+        Err(_) => return PQSigningError::InvalidEpoch,
+    };
+
     let sk = &*(sk as *const PQSignatureSchemeSecretKeyInner);
     let message_slice = slice::from_raw_parts(message, message_len);
     
@@ -259,7 +267,7 @@ pub unsafe extern "C" fn pq_sign(
     let mut message_array = [0u8; MESSAGE_LENGTH];
     message_array.copy_from_slice(message_slice);
 
-    match SignatureSchemeType::sign(&sk.inner, epoch, &message_array) {
+    match SignatureSchemeType::sign(&sk.inner, epoch32, &message_array) {
         Ok(signature) => {
             let sig_wrapper = Box::new(PQSignatureInner {
                 inner: Box::new(signature),
@@ -290,7 +298,7 @@ pub unsafe extern "C" fn pq_sign(
 #[no_mangle]
 pub unsafe extern "C" fn pq_verify(
     pk: *const PQSignatureSchemePublicKey,
-    epoch: u32,
+    epoch: u64,
     message: *const u8,
     message_len: usize,
     signature: *const PQSignature,
@@ -303,6 +311,11 @@ pub unsafe extern "C" fn pq_verify(
         return -2; // Error: invalid message length
     }
 
+    let epoch32 = match u32::try_from(epoch) {
+        Ok(value) => value,
+        Err(_) => return -3,
+    };
+
     let pk = &*(pk as *const PQSignatureSchemePublicKeyInner);
     let signature = &*(signature as *const PQSignatureInner);
     let message_slice = slice::from_raw_parts(message, message_len);
@@ -311,7 +324,7 @@ pub unsafe extern "C" fn pq_verify(
     let mut message_array = [0u8; MESSAGE_LENGTH];
     message_array.copy_from_slice(message_slice);
 
-    let is_valid = SignatureSchemeType::verify(&pk.inner, epoch, &message_array, &signature.inner);
+    let is_valid = SignatureSchemeType::verify(&pk.inner, epoch32, &message_array, &signature.inner);
     
     if is_valid {
         1
@@ -346,6 +359,7 @@ pub extern "C" fn pq_error_description(error: PQSigningError) -> *mut c_char {
         PQSigningError::InvalidMessageLength => {
             "Invalid message length (must be 32 bytes)"
         }
+        PQSigningError::InvalidEpoch => "Epoch outside supported range",
         PQSigningError::UnknownError => "Unknown error",
     };
 
@@ -1000,6 +1014,7 @@ mod tests {
             PQSigningError::EncodingAttemptsExceeded,
             PQSigningError::InvalidPointer,
             PQSigningError::InvalidMessageLength,
+            PQSigningError::InvalidEpoch,
             PQSigningError::UnknownError,
         ];
 

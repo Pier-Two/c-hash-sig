@@ -40,7 +40,7 @@ void pq_public_key_free(struct PQSignatureSchemePublicKey *key);
 // Sign message
 enum PQSigningError pq_sign(
     const struct PQSignatureSchemeSecretKey *sk,
-    uint32_t epoch,
+    uint64_t epoch,
     const uint8_t *message,
     uintptr_t message_len,
     struct PQSignature **signature_out
@@ -49,7 +49,7 @@ enum PQSigningError pq_sign(
 // Verify signature
 int pq_verify(
     const struct PQSignatureSchemePublicKey *pk,
-    uint32_t epoch,
+    uint64_t epoch,
     const uint8_t *message,
     uintptr_t message_len,
     const struct PQSignature *signature
@@ -169,7 +169,7 @@ int main() {
     
     // Sign message
     struct PQSignature *signature = NULL;
-    uint32_t epoch = 100;
+uint64_t epoch = 100;
     
     result = pq_sign(sk, epoch, message, 32, &signature);
     if (result != Success) {

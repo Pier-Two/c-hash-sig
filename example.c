@@ -56,7 +56,7 @@ int main() {
     // 4. Sign message
     printf("4. Signing message for epoch 100...\n");
     struct PQSignature *signature = NULL;
-    uint32_t epoch = 100;
+    uint64_t epoch = 100;
     
     result = pq_sign(sk, epoch, message, 32, &signature);
     if (result != Success) {
