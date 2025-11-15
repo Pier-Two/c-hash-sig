@@ -8,6 +8,7 @@ use std::slice;
 use hashsig::signature::generalized_xmss::instantiations_poseidon_top_level::lifetime_2_to_the_32::hashing_optimized::SIGTopLevelTargetSumLifetime32Dim64Base8;
 use hashsig::signature::{SignatureScheme, SignatureSchemeSecretKey};
 use hashsig::MESSAGE_LENGTH;
+use serde::{Deserialize, Serialize};
 use serde_json;
 
 // Type aliases for convenience
@@ -15,6 +16,236 @@ type SignatureSchemeType = SIGTopLevelTargetSumLifetime32Dim64Base8;
 type PublicKeyType = <SignatureSchemeType as SignatureScheme>::PublicKey;
 type SecretKeyType = <SignatureSchemeType as SignatureScheme>::SecretKey;
 type SignatureType = <SignatureSchemeType as SignatureScheme>::Signature;
+
+const HASH_LEN_FE: usize = 8;
+const PARAMETER_LEN_FE: usize = 5;
+const RAND_LEN_FE: usize = 7;
+const LOG_LIFETIME: usize = 32;
+const DIMENSION: usize = 64;
+const FIELD_ELEMENT_SIZE: usize = 4;
+const SIGNATURE_LEN_BYTES: usize =
+    FIELD_ELEMENT_SIZE * ((HASH_LEN_FE * LOG_LIFETIME) + RAND_LEN_FE + (HASH_LEN_FE * DIMENSION));
+const VALIDATOR_PUBKEY_BYTES: usize = FIELD_ELEMENT_SIZE * (HASH_LEN_FE + PARAMETER_LEN_FE);
+
+const KOALA_PRIME: u32 = 0x7f000001;
+const KOALA_MONTY_MU: u32 = 0x81000001;
+const KOALA_MONTY_BITS: u32 = 32;
+const KOALA_MONTY_MASK: u64 = 0xffff_ffff;
+
+#[derive(Serialize, Deserialize, Clone)]
+struct PortableSignature {
+    path: PortablePath,
+    rho: [u32; RAND_LEN_FE],
+    hashes: Vec<[u32; HASH_LEN_FE]>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct PortablePath {
+    co_path: Vec<[u32; HASH_LEN_FE]>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct PortablePublicKey {
+    root: [u32; HASH_LEN_FE],
+    parameter: [u32; PARAMETER_LEN_FE],
+}
+
+fn decode_signature_to_portable(signature: &SignatureType) -> Result<PortableSignature, PQSigningError> {
+    let config = bincode::config::standard();
+    let encoded = bincode::serde::encode_to_vec(signature, config)
+        .map_err(|_| PQSigningError::UnknownError)?;
+    let (portable, _) = bincode::serde::decode_from_slice::<PortableSignature, _>(&encoded, config)
+        .map_err(|_| PQSigningError::UnknownError)?;
+    validate_portable(&portable)?;
+    Ok(portable)
+}
+
+fn encode_portable_to_signature(portable: PortableSignature) -> Result<SignatureType, PQSigningError> {
+    validate_portable(&portable)?;
+    let config = bincode::config::standard();
+    let encoded = bincode::serde::encode_to_vec(&portable, config)
+        .map_err(|_| PQSigningError::UnknownError)?;
+    let (signature, _) = bincode::serde::decode_from_slice::<SignatureType, _>(&encoded, config)
+        .map_err(|_| PQSigningError::UnknownError)?;
+    Ok(signature)
+}
+
+fn validate_portable(portable: &PortableSignature) -> Result<(), PQSigningError> {
+    if portable.path.co_path.len() != LOG_LIFETIME {
+        return Err(PQSigningError::UnknownError);
+    }
+    if portable.hashes.len() != DIMENSION {
+        return Err(PQSigningError::UnknownError);
+    }
+    Ok(())
+}
+
+fn write_lean_bytes(portable: &PortableSignature, target: &mut [u8]) -> Result<(), PQSigningError> {
+    if target.len() < SIGNATURE_LEN_BYTES {
+        return Err(PQSigningError::UnknownError);
+    }
+    let mut offset = 0usize;
+    for digest in &portable.path.co_path {
+        write_digest(digest, target, &mut offset)?;
+    }
+    for &value in &portable.rho {
+        write_canonical_field(monty_to_canonical(value), target, &mut offset)?;
+    }
+    for digest in &portable.hashes {
+        write_digest(digest, target, &mut offset)?;
+    }
+    if offset != SIGNATURE_LEN_BYTES {
+        return Err(PQSigningError::UnknownError);
+    }
+    if target.len() > SIGNATURE_LEN_BYTES {
+        for byte in &mut target[SIGNATURE_LEN_BYTES..] {
+            *byte = 0;
+        }
+    }
+    Ok(())
+}
+
+fn parse_lean_bytes(data: &[u8]) -> Result<PortableSignature, PQSigningError> {
+    if data.len() != SIGNATURE_LEN_BYTES {
+        return Err(PQSigningError::UnknownError);
+    }
+    let mut offset = 0usize;
+    let mut co_path = Vec::with_capacity(LOG_LIFETIME);
+    for _ in 0..LOG_LIFETIME {
+        co_path.push(read_digest(data, &mut offset)?);
+    }
+    let mut rho = [0u32; RAND_LEN_FE];
+    for slot in rho.iter_mut() {
+        let value = read_canonical_field(data, &mut offset)?;
+        *slot = canonical_to_monty(value)?;
+    }
+    let mut hashes = Vec::with_capacity(DIMENSION);
+    for _ in 0..DIMENSION {
+        hashes.push(read_digest(data, &mut offset)?);
+    }
+    if offset != SIGNATURE_LEN_BYTES {
+        return Err(PQSigningError::UnknownError);
+    }
+    Ok(PortableSignature {
+        path: PortablePath { co_path },
+        rho,
+        hashes,
+    })
+}
+
+fn read_digest(data: &[u8], offset: &mut usize) -> Result<[u32; HASH_LEN_FE], PQSigningError> {
+    let mut digest = [0u32; HASH_LEN_FE];
+    for slot in digest.iter_mut() {
+        let canonical = read_canonical_field(data, offset)?;
+        *slot = canonical_to_monty(canonical)?;
+    }
+    Ok(digest)
+}
+
+fn write_digest(digest: &[u32; HASH_LEN_FE], target: &mut [u8], offset: &mut usize) -> Result<(), PQSigningError> {
+    for &value in digest {
+        write_canonical_field(monty_to_canonical(value), target, offset)?;
+    }
+    Ok(())
+}
+
+fn read_canonical_field(data: &[u8], offset: &mut usize) -> Result<u32, PQSigningError> {
+    if *offset + FIELD_ELEMENT_SIZE > data.len() {
+        return Err(PQSigningError::UnknownError);
+    }
+    let bytes = &data[*offset..*offset + FIELD_ELEMENT_SIZE];
+    let value = u32::from_le_bytes(bytes.try_into().unwrap());
+    if value >= KOALA_PRIME {
+        return Err(PQSigningError::UnknownError);
+    }
+    *offset += FIELD_ELEMENT_SIZE;
+    Ok(value)
+}
+
+fn write_canonical_field(value: u32, target: &mut [u8], offset: &mut usize) -> Result<(), PQSigningError> {
+    if *offset + FIELD_ELEMENT_SIZE > target.len() {
+        return Err(PQSigningError::UnknownError);
+    }
+    target[*offset..*offset + FIELD_ELEMENT_SIZE].copy_from_slice(&value.to_le_bytes());
+    *offset += FIELD_ELEMENT_SIZE;
+    Ok(())
+}
+
+fn monty_to_canonical(value: u32) -> u32 {
+    monty_reduce(value as u64)
+}
+
+fn canonical_to_monty(value: u32) -> Result<u32, PQSigningError> {
+    if value >= KOALA_PRIME {
+        return Err(PQSigningError::UnknownError);
+    }
+    Ok((((value as u64) << KOALA_MONTY_BITS) % (KOALA_PRIME as u64)) as u32)
+}
+
+fn decode_public_key_to_portable(pk: &PublicKeyType) -> Result<PortablePublicKey, PQSigningError> {
+    let config = bincode::config::standard();
+    let encoded = bincode::serde::encode_to_vec(pk, config)
+        .map_err(|_| PQSigningError::UnknownError)?;
+    let (portable, _) =
+        bincode::serde::decode_from_slice::<PortablePublicKey, _>(&encoded, config)
+            .map_err(|_| PQSigningError::UnknownError)?;
+    Ok(portable)
+}
+
+fn encode_portable_to_public_key(portable: PortablePublicKey) -> Result<PublicKeyType, PQSigningError> {
+    let config = bincode::config::standard();
+    let encoded = bincode::serde::encode_to_vec(&portable, config)
+        .map_err(|_| PQSigningError::UnknownError)?;
+    let (pk, _) = bincode::serde::decode_from_slice::<PublicKeyType, _>(&encoded, config)
+        .map_err(|_| PQSigningError::UnknownError)?;
+    Ok(pk)
+}
+
+fn write_public_key_bytes(portable: &PortablePublicKey, target: &mut [u8]) -> Result<(), PQSigningError> {
+    if target.len() < VALIDATOR_PUBKEY_BYTES {
+        return Err(PQSigningError::UnknownError);
+    }
+    let mut offset = 0usize;
+    write_digest(&portable.root, target, &mut offset)?;
+    for &value in &portable.parameter {
+        write_canonical_field(monty_to_canonical(value), target, &mut offset)?;
+    }
+    if offset != VALIDATOR_PUBKEY_BYTES {
+        return Err(PQSigningError::UnknownError);
+    }
+    if target.len() > VALIDATOR_PUBKEY_BYTES {
+        for byte in &mut target[VALIDATOR_PUBKEY_BYTES..] {
+            *byte = 0;
+        }
+    }
+    Ok(())
+}
+
+fn parse_public_key_bytes(data: &[u8]) -> Result<PortablePublicKey, PQSigningError> {
+    if data.len() != VALIDATOR_PUBKEY_BYTES {
+        return Err(PQSigningError::UnknownError);
+    }
+    let mut offset = 0usize;
+    let root = read_digest(data, &mut offset)?;
+    let mut parameter = [0u32; PARAMETER_LEN_FE];
+    for slot in parameter.iter_mut() {
+        let canonical = read_canonical_field(data, &mut offset)?;
+        *slot = canonical_to_monty(canonical)?;
+    }
+    if offset != VALIDATOR_PUBKEY_BYTES {
+        return Err(PQSigningError::UnknownError);
+    }
+    Ok(PortablePublicKey { root, parameter })
+}
+
+fn monty_reduce(x: u64) -> u32 {
+    let t = x.wrapping_mul(KOALA_MONTY_MU as u64) & KOALA_MONTY_MASK;
+    let u = t * (KOALA_PRIME as u64);
+    let (x_sub_u, over) = x.overflowing_sub(u);
+    let x_sub_u_hi = (x_sub_u >> KOALA_MONTY_BITS) as u32;
+    let corr = if over { KOALA_PRIME } else { 0 };
+    x_sub_u_hi.wrapping_add(corr)
+}
 
 /// Wrapper for signature scheme secret key
 /// 
@@ -508,20 +739,23 @@ pub unsafe extern "C" fn pq_public_key_serialize(
     }
 
     let pk = &*(pk as *const PQSignatureSchemePublicKeyInner);
-    
-    match bincode::serde::encode_to_vec(&*pk.inner, bincode::config::standard()) {
-        Ok(bytes) => {
-            if bytes.len() > buffer_len {
-                *written_len = bytes.len();
-                return PQSigningError::UnknownError; // Буфер слишком мал
-            }
-            let buffer_slice = slice::from_raw_parts_mut(buffer, buffer_len);
-            buffer_slice[..bytes.len()].copy_from_slice(&bytes);
-            *written_len = bytes.len();
-            PQSigningError::Success
-        }
-        Err(_) => PQSigningError::UnknownError,
+    if buffer_len < VALIDATOR_PUBKEY_BYTES {
+        *written_len = VALIDATOR_PUBKEY_BYTES;
+        return PQSigningError::UnknownError;
     }
+
+    let portable = match decode_public_key_to_portable(pk.inner.as_ref()) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    let buffer_slice = slice::from_raw_parts_mut(buffer, buffer_len);
+    if let Err(err) = write_public_key_bytes(&portable, buffer_slice) {
+        return err;
+    }
+
+    *written_len = VALIDATOR_PUBKEY_BYTES;
+    PQSigningError::Success
 }
 
 /// Deserialize public key from bytes
@@ -547,17 +781,21 @@ pub unsafe extern "C" fn pq_public_key_deserialize(
     }
 
     let buffer_slice = slice::from_raw_parts(buffer, buffer_len);
-    
-    match bincode::serde::decode_from_slice(buffer_slice, bincode::config::standard()) {
-        Ok((pk, _)) => {
-            let pk_wrapper = Box::new(PQSignatureSchemePublicKeyInner {
-                inner: Box::new(pk),
-            });
-            *pk_out = Box::into_raw(pk_wrapper) as *mut PQSignatureSchemePublicKey;
-            PQSigningError::Success
-        }
-        Err(_) => PQSigningError::UnknownError,
-    }
+    let portable = match parse_public_key_bytes(buffer_slice) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    let pk = match encode_portable_to_public_key(portable) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    let pk_wrapper = Box::new(PQSignatureSchemePublicKeyInner {
+        inner: Box::new(pk),
+    });
+    *pk_out = Box::into_raw(pk_wrapper) as *mut PQSignatureSchemePublicKey;
+    PQSigningError::Success
 }
 
 /// Deserialize public key from JSON
@@ -617,20 +855,23 @@ pub unsafe extern "C" fn pq_signature_serialize(
     }
 
     let signature = &*(signature as *const PQSignatureInner);
-    
-    match bincode::serde::encode_to_vec(&*signature.inner, bincode::config::standard()) {
-        Ok(bytes) => {
-            if bytes.len() > buffer_len {
-                *written_len = bytes.len();
-                return PQSigningError::UnknownError; // Буфер слишком мал
-            }
-            let buffer_slice = slice::from_raw_parts_mut(buffer, buffer_len);
-            buffer_slice[..bytes.len()].copy_from_slice(&bytes);
-            *written_len = bytes.len();
-            PQSigningError::Success
-        }
-        Err(_) => PQSigningError::UnknownError,
+    if buffer_len < SIGNATURE_LEN_BYTES {
+        *written_len = SIGNATURE_LEN_BYTES;
+        return PQSigningError::UnknownError;
     }
+
+    let portable = match decode_signature_to_portable(signature.inner.as_ref()) {
+        Ok(sig) => sig,
+        Err(err) => return err,
+    };
+
+    let buffer_slice = slice::from_raw_parts_mut(buffer, buffer_len);
+    if let Err(err) = write_lean_bytes(&portable, buffer_slice) {
+        return err;
+    }
+
+    *written_len = SIGNATURE_LEN_BYTES;
+    PQSigningError::Success
 }
 
 /// Deserialize signature from bytes
@@ -656,17 +897,21 @@ pub unsafe extern "C" fn pq_signature_deserialize(
     }
 
     let buffer_slice = slice::from_raw_parts(buffer, buffer_len);
-    
-    match bincode::serde::decode_from_slice(buffer_slice, bincode::config::standard()) {
-        Ok((signature, _)) => {
-            let sig_wrapper = Box::new(PQSignatureInner {
-                inner: Box::new(signature),
-            });
-            *signature_out = Box::into_raw(sig_wrapper) as *mut PQSignature;
-            PQSigningError::Success
-        }
-        Err(_) => PQSigningError::UnknownError,
-    }
+    let portable = match parse_lean_bytes(buffer_slice) {
+        Ok(sig) => sig,
+        Err(err) => return err,
+    };
+
+    let signature = match encode_portable_to_signature(portable) {
+        Ok(sig) => sig,
+        Err(err) => return err,
+    };
+
+    let sig_wrapper = Box::new(PQSignatureInner {
+        inner: Box::new(signature),
+    });
+    *signature_out = Box::into_raw(sig_wrapper) as *mut PQSignature;
+    PQSigningError::Success
 }
 
 #[cfg(test)]
@@ -938,6 +1183,106 @@ mod tests {
             pq_secret_key_free(sk_restored);
             pq_secret_key_free(sk);
             pq_public_key_free(pk_restored);
+            pq_public_key_free(pk);
+        }
+    }
+
+    #[test]
+    fn test_signature_leanspec_roundtrip() {
+        unsafe {
+            let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
+            let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
+            assert_eq!(pq_key_gen(0, 512, &mut pk, &mut sk), PQSigningError::Success);
+
+            let mut signature_ptr: *mut PQSignature = ptr::null_mut();
+            let message = [0u8; MESSAGE_LENGTH];
+            let epoch = 77u64;
+            assert_eq!(
+                pq_sign(sk, epoch, message.as_ptr(), MESSAGE_LENGTH, &mut signature_ptr),
+                PQSigningError::Success
+            );
+            assert!(!signature_ptr.is_null());
+
+            let mut buffer = vec![0u8; SIGNATURE_LEN_BYTES];
+            let mut written = 0usize;
+            assert_eq!(
+                pq_signature_serialize(
+                    signature_ptr,
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    &mut written,
+                ),
+                PQSigningError::Success
+            );
+            assert_eq!(written, SIGNATURE_LEN_BYTES);
+
+            let mut restored: *mut PQSignature = ptr::null_mut();
+            assert_eq!(
+                pq_signature_deserialize(buffer.as_ptr(), buffer.len(), &mut restored),
+                PQSigningError::Success
+            );
+            assert!(!restored.is_null());
+
+            let mut roundtrip = vec![0u8; SIGNATURE_LEN_BYTES];
+            let mut roundtrip_written = 0usize;
+            assert_eq!(
+                pq_signature_serialize(
+                    restored,
+                    roundtrip.as_mut_ptr(),
+                    roundtrip.len(),
+                    &mut roundtrip_written,
+                ),
+                PQSigningError::Success
+            );
+            assert_eq!(roundtrip_written, SIGNATURE_LEN_BYTES);
+            assert_eq!(buffer, roundtrip);
+
+            pq_signature_free(restored);
+            pq_signature_free(signature_ptr);
+            pq_secret_key_free(sk);
+            pq_public_key_free(pk);
+        }
+    }
+
+    #[test]
+    fn test_public_key_leanspec_roundtrip() {
+        unsafe {
+            let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
+            let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
+            assert_eq!(pq_key_gen(0, 256, &mut pk, &mut sk), PQSigningError::Success);
+            assert!(!pk.is_null());
+
+            let mut buffer = vec![0u8; VALIDATOR_PUBKEY_BYTES];
+            let mut written = 0usize;
+            assert_eq!(
+                pq_public_key_serialize(pk, buffer.as_mut_ptr(), buffer.len(), &mut written),
+                PQSigningError::Success
+            );
+            assert_eq!(written, VALIDATOR_PUBKEY_BYTES);
+
+            let mut restored: *mut PQSignatureSchemePublicKey = ptr::null_mut();
+            assert_eq!(
+                pq_public_key_deserialize(buffer.as_ptr(), buffer.len(), &mut restored),
+                PQSigningError::Success
+            );
+            assert!(!restored.is_null());
+
+            let mut roundtrip = vec![0u8; VALIDATOR_PUBKEY_BYTES];
+            let mut roundtrip_written = 0usize;
+            assert_eq!(
+                pq_public_key_serialize(
+                    restored,
+                    roundtrip.as_mut_ptr(),
+                    roundtrip.len(),
+                    &mut roundtrip_written,
+                ),
+                PQSigningError::Success
+            );
+            assert_eq!(roundtrip_written, VALIDATOR_PUBKEY_BYTES);
+            assert_eq!(buffer, roundtrip);
+
+            pq_public_key_free(restored);
+            pq_secret_key_free(sk);
             pq_public_key_free(pk);
         }
     }

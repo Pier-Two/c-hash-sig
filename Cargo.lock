@@ -598,6 +598,7 @@ dependencies = [
  "cbindgen",
  "hashsig",
  "rand",
+ "serde",
  "serde_json",
 ]
 
