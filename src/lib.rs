@@ -564,6 +564,80 @@ pub unsafe extern "C" fn pq_verify(
     }
 }
 
+/// Verify a signature from bincode-serialized bytes
+///
+/// This function deserializes the public key and signature from bincode format
+/// (compatible with Zeam's hashsig-glue serialization) and verifies the signature.
+///
+/// # Parameters
+/// - `pubkey_bytes`: pointer to bincode-serialized public key bytes
+/// - `pubkey_len`: length of public key bytes
+/// - `epoch`: signature epoch
+/// - `message`: pointer to message (must be 32 bytes)
+/// - `message_len`: message length (must be MESSAGE_LENGTH = 32)
+/// - `signature_bytes`: pointer to bincode-serialized signature bytes
+/// - `signature_len`: length of signature bytes
+///
+/// # Returns
+/// 1 if signature is valid, 0 if invalid, negative value on error
+///
+/// # Safety
+/// All pointers must be valid and point to correctly sized data
+#[no_mangle]
+pub unsafe extern "C" fn pq_verify_bincode(
+    pubkey_bytes: *const u8,
+    pubkey_len: usize,
+    epoch: u64,
+    message: *const u8,
+    message_len: usize,
+    signature_bytes: *const u8,
+    signature_len: usize,
+) -> c_int {
+    use bincode::config::{Configuration, Fixint, LittleEndian, NoLimit};
+    const BINCODE_CONFIG: Configuration<LittleEndian, Fixint, NoLimit> =
+        bincode::config::standard().with_fixed_int_encoding();
+
+    if pubkey_bytes.is_null() || message.is_null() || signature_bytes.is_null() {
+        return -1;
+    }
+
+    if message_len != MESSAGE_LENGTH {
+        return -2;
+    }
+
+    let epoch32 = match u32::try_from(epoch) {
+        Ok(value) => value,
+        Err(_) => return -3,
+    };
+
+    let pk_data = slice::from_raw_parts(pubkey_bytes, pubkey_len);
+    let sig_data = slice::from_raw_parts(signature_bytes, signature_len);
+    let msg_data = slice::from_raw_parts(message, message_len);
+
+    let message_array: &[u8; MESSAGE_LENGTH] = match msg_data.try_into() {
+        Ok(arr) => arr,
+        Err(_) => return -4,
+    };
+
+    let pk: PublicKeyType = match bincode::serde::decode_from_slice(pk_data, BINCODE_CONFIG) {
+        Ok((pk, _)) => pk,
+        Err(_) => return -5,
+    };
+
+    let sig: SignatureType = match bincode::serde::decode_from_slice(sig_data, BINCODE_CONFIG) {
+        Ok((sig, _)) => sig,
+        Err(_) => return -6,
+    };
+
+    let is_valid = <SignatureSchemeType as SignatureScheme>::verify(&pk, epoch32, message_array, &sig);
+
+    if is_valid {
+        1
+    } else {
+        0
+    }
+}
+
 // ============================================================================
 // Error handling functions
 // ============================================================================
@@ -874,6 +948,55 @@ pub unsafe extern "C" fn pq_signature_serialize(
     PQSigningError::Success
 }
 
+/// Serialize signature to bytes using bincode format
+///
+/// This function serializes signatures using bincode format
+/// (compatible with Zeam's hashsig-glue serialization).
+///
+/// # Parameters
+/// - `signature`: signature
+/// - `buffer`: buffer for writing
+/// - `buffer_len`: buffer size
+/// - `written_len`: pointer to write actual data size (output)
+///
+/// # Returns
+/// Error code
+///
+/// # Safety
+/// All pointers must be valid
+#[no_mangle]
+pub unsafe extern "C" fn pq_signature_serialize_bincode(
+    signature: *const PQSignature,
+    buffer: *mut u8,
+    buffer_len: usize,
+    written_len: *mut usize,
+) -> PQSigningError {
+    use bincode::config::{Configuration, Fixint, LittleEndian, NoLimit};
+    const BINCODE_CONFIG: Configuration<LittleEndian, Fixint, NoLimit> =
+        bincode::config::standard().with_fixed_int_encoding();
+
+    if signature.is_null() || buffer.is_null() || written_len.is_null() {
+        return PQSigningError::InvalidPointer;
+    }
+
+    let signature = &*(signature as *const PQSignatureInner);
+    let buffer_slice = slice::from_raw_parts_mut(buffer, buffer_len);
+
+    match bincode::serde::encode_into_slice(signature.inner.as_ref(), buffer_slice, BINCODE_CONFIG) {
+        Ok(bytes_written) => {
+            *written_len = bytes_written;
+            // Zero remaining bytes
+            if bytes_written < buffer_len {
+                for byte in &mut buffer_slice[bytes_written..] {
+                    *byte = 0;
+                }
+            }
+            PQSigningError::Success
+        }
+        Err(_) => PQSigningError::UnknownError,
+    }
+}
+
 /// Deserialize signature from bytes
 ///
 /// # Parameters
@@ -905,6 +1028,48 @@ pub unsafe extern "C" fn pq_signature_deserialize(
     let signature = match encode_portable_to_signature(portable) {
         Ok(sig) => sig,
         Err(err) => return err,
+    };
+
+    let sig_wrapper = Box::new(PQSignatureInner {
+        inner: Box::new(signature),
+    });
+    *signature_out = Box::into_raw(sig_wrapper) as *mut PQSignature;
+    PQSigningError::Success
+}
+
+/// Deserialize signature from bincode-format bytes
+///
+/// This function deserializes signatures using bincode format
+/// (compatible with Zeam's hashsig-glue serialization).
+///
+/// # Parameters
+/// - `buffer`: buffer with bincode-serialized data
+/// - `buffer_len`: buffer size
+/// - `signature_out`: pointer to write signature (output)
+///
+/// # Returns
+/// Error code
+///
+/// # Safety
+/// All pointers must be valid
+#[no_mangle]
+pub unsafe extern "C" fn pq_signature_deserialize_bincode(
+    buffer: *const u8,
+    buffer_len: usize,
+    signature_out: *mut *mut PQSignature,
+) -> PQSigningError {
+    use bincode::config::{Configuration, Fixint, LittleEndian, NoLimit};
+    const BINCODE_CONFIG: Configuration<LittleEndian, Fixint, NoLimit> =
+        bincode::config::standard().with_fixed_int_encoding();
+
+    if buffer.is_null() || signature_out.is_null() {
+        return PQSigningError::InvalidPointer;
+    }
+
+    let buffer_slice = slice::from_raw_parts(buffer, buffer_len);
+    let signature: SignatureType = match bincode::serde::decode_from_slice(buffer_slice, BINCODE_CONFIG) {
+        Ok((sig, _)) => sig,
+        Err(_) => return PQSigningError::UnknownError,
     };
 
     let sig_wrapper = Box::new(PQSignatureInner {

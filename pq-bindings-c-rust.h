@@ -187,6 +187,35 @@ int pq_verify(const struct PQSignatureSchemePublicKey *pk,
               const struct PQSignature *signature);
 
 /**
+ * Verify a signature from bincode-serialized bytes
+ *
+ * This function deserializes the public key and signature from bincode format
+ * (compatible with Zeam's hashsig-glue serialization) and verifies the signature.
+ *
+ * # Parameters
+ * - `pubkey_bytes`: pointer to bincode-serialized public key bytes
+ * - `pubkey_len`: length of public key bytes
+ * - `epoch`: signature epoch
+ * - `message`: pointer to message (must be 32 bytes)
+ * - `message_len`: message length (must be MESSAGE_LENGTH = 32)
+ * - `signature_bytes`: pointer to bincode-serialized signature bytes
+ * - `signature_len`: length of signature bytes
+ *
+ * # Returns
+ * 1 if signature is valid, 0 if invalid, negative value on error
+ *
+ * # Safety
+ * All pointers must be valid and point to correctly sized data
+ */
+int pq_verify_bincode(const uint8_t *pubkey_bytes,
+                      uintptr_t pubkey_len,
+                      uint64_t epoch,
+                      const uint8_t *message,
+                      uintptr_t message_len,
+                      const uint8_t *signature_bytes,
+                      uintptr_t signature_len);
+
+/**
  * Get error description string
  *
  * # Parameters
@@ -239,6 +268,17 @@ enum PQSigningError pq_secret_key_deserialize(const uint8_t *buffer,
                                               uintptr_t buffer_len,
                                               struct PQSignatureSchemeSecretKey **sk_out);
 
+/**
+ * Deserialize secret key from JSON
+ *
+ * # Parameters
+ * - `json`: pointer to UTF-8 JSON buffer
+ * - `json_len`: buffer size
+ * - `sk_out`: pointer to write secret key (output)
+ *
+ * # Returns
+ * Error code
+ */
 enum PQSigningError pq_secret_key_from_json(const uint8_t *json,
                                             uintptr_t json_len,
                                             struct PQSignatureSchemeSecretKey **sk_out);
@@ -281,6 +321,17 @@ enum PQSigningError pq_public_key_deserialize(const uint8_t *buffer,
                                               uintptr_t buffer_len,
                                               struct PQSignatureSchemePublicKey **pk_out);
 
+/**
+ * Deserialize public key from JSON
+ *
+ * # Parameters
+ * - `json`: pointer to UTF-8 JSON buffer
+ * - `json_len`: buffer size
+ * - `pk_out`: pointer to write public key (output)
+ *
+ * # Returns
+ * Error code
+ */
 enum PQSigningError pq_public_key_from_json(const uint8_t *json,
                                             uintptr_t json_len,
                                             struct PQSignatureSchemePublicKey **pk_out);
@@ -306,6 +357,29 @@ enum PQSigningError pq_signature_serialize(const struct PQSignature *signature,
                                            uintptr_t *written_len);
 
 /**
+ * Serialize signature to bytes using bincode format
+ *
+ * This function serializes signatures using bincode format
+ * (compatible with Zeam's hashsig-glue serialization).
+ *
+ * # Parameters
+ * - `signature`: signature
+ * - `buffer`: buffer for writing
+ * - `buffer_len`: buffer size
+ * - `written_len`: pointer to write actual data size (output)
+ *
+ * # Returns
+ * Error code
+ *
+ * # Safety
+ * All pointers must be valid
+ */
+enum PQSigningError pq_signature_serialize_bincode(const struct PQSignature *signature,
+                                                   uint8_t *buffer,
+                                                   uintptr_t buffer_len,
+                                                   uintptr_t *written_len);
+
+/**
  * Deserialize signature from bytes
  *
  * # Parameters
@@ -322,3 +396,24 @@ enum PQSigningError pq_signature_serialize(const struct PQSignature *signature,
 enum PQSigningError pq_signature_deserialize(const uint8_t *buffer,
                                              uintptr_t buffer_len,
                                              struct PQSignature **signature_out);
+
+/**
+ * Deserialize signature from bincode-format bytes
+ *
+ * This function deserializes signatures using bincode format
+ * (compatible with Zeam's hashsig-glue serialization).
+ *
+ * # Parameters
+ * - `buffer`: buffer with bincode-serialized data
+ * - `buffer_len`: buffer size
+ * - `signature_out`: pointer to write signature (output)
+ *
+ * # Returns
+ * Error code
+ *
+ * # Safety
+ * All pointers must be valid
+ */
+enum PQSigningError pq_signature_deserialize_bincode(const uint8_t *buffer,
+                                                     uintptr_t buffer_len,
+                                                     struct PQSignature **signature_out);
