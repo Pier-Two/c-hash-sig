@@ -123,6 +123,16 @@ void pq_advance_preparation(struct PQSignatureSchemeSecretKey *key);
 uint64_t pq_get_lifetime(void);
 
 /**
+ * Get signature size in bytes
+ */
+uintptr_t pq_get_signature_size(void);
+
+/**
+ * Get public key size in bytes
+ */
+uintptr_t pq_get_public_key_size(void);
+
+/**
  * Generate key pair (public and secret)
  *
  * # Parameters
@@ -187,18 +197,18 @@ int pq_verify(const struct PQSignatureSchemePublicKey *pk,
               const struct PQSignature *signature);
 
 /**
- * Verify a signature from bincode-serialized bytes
+ * Verify a signature from SSZ-serialized bytes
  *
- * This function deserializes the public key and signature from bincode format
- * (compatible with Zeam's hashsig-glue serialization) and verifies the signature.
+ * This function deserializes the public key and signature from SSZ format
+ * (compatible with Ream's leanSig serialization) and verifies the signature.
  *
  * # Parameters
- * - `pubkey_bytes`: pointer to bincode-serialized public key bytes
+ * - `pubkey_bytes`: pointer to SSZ-serialized public key bytes (52 bytes)
  * - `pubkey_len`: length of public key bytes
  * - `epoch`: signature epoch
  * - `message`: pointer to message (must be 32 bytes)
  * - `message_len`: message length (must be MESSAGE_LENGTH = 32)
- * - `signature_bytes`: pointer to bincode-serialized signature bytes
+ * - `signature_bytes`: pointer to SSZ-serialized signature bytes
  * - `signature_len`: length of signature bytes
  *
  * # Returns
@@ -207,13 +217,13 @@ int pq_verify(const struct PQSignatureSchemePublicKey *pk,
  * # Safety
  * All pointers must be valid and point to correctly sized data
  */
-int pq_verify_bincode(const uint8_t *pubkey_bytes,
-                      uintptr_t pubkey_len,
-                      uint64_t epoch,
-                      const uint8_t *message,
-                      uintptr_t message_len,
-                      const uint8_t *signature_bytes,
-                      uintptr_t signature_len);
+int pq_verify_ssz(const uint8_t *pubkey_bytes,
+                  uintptr_t pubkey_len,
+                  uint64_t epoch,
+                  const uint8_t *message,
+                  uintptr_t message_len,
+                  const uint8_t *signature_bytes,
+                  uintptr_t signature_len);
 
 /**
  * Get error description string
@@ -231,7 +241,7 @@ int pq_verify_bincode(const uint8_t *pubkey_bytes,
 char *pq_error_description(enum PQSigningError error);
 
 /**
- * Serialize secret key to bytes
+ * Serialize secret key to bytes using SSZ format
  *
  * # Parameters
  * - `sk`: secret key
@@ -251,7 +261,7 @@ enum PQSigningError pq_secret_key_serialize(const struct PQSignatureSchemeSecret
                                             uintptr_t *written_len);
 
 /**
- * Deserialize secret key from bytes
+ * Deserialize secret key from bytes using SSZ format
  *
  * # Parameters
  * - `buffer`: buffer with data
@@ -284,7 +294,7 @@ enum PQSigningError pq_secret_key_from_json(const uint8_t *json,
                                             struct PQSignatureSchemeSecretKey **sk_out);
 
 /**
- * Serialize public key to bytes
+ * Serialize public key to bytes using SSZ format
  *
  * # Parameters
  * - `pk`: public key
@@ -304,7 +314,7 @@ enum PQSigningError pq_public_key_serialize(const struct PQSignatureSchemePublic
                                             uintptr_t *written_len);
 
 /**
- * Deserialize public key from bytes
+ * Deserialize public key from bytes using SSZ format
  *
  * # Parameters
  * - `buffer`: buffer with data
@@ -337,7 +347,7 @@ enum PQSigningError pq_public_key_from_json(const uint8_t *json,
                                             struct PQSignatureSchemePublicKey **pk_out);
 
 /**
- * Serialize signature to bytes
+ * Serialize signature to bytes using SSZ format
  *
  * # Parameters
  * - `signature`: signature
@@ -357,30 +367,7 @@ enum PQSigningError pq_signature_serialize(const struct PQSignature *signature,
                                            uintptr_t *written_len);
 
 /**
- * Serialize signature to bytes using bincode format
- *
- * This function serializes signatures using bincode format
- * (compatible with Zeam's hashsig-glue serialization).
- *
- * # Parameters
- * - `signature`: signature
- * - `buffer`: buffer for writing
- * - `buffer_len`: buffer size
- * - `written_len`: pointer to write actual data size (output)
- *
- * # Returns
- * Error code
- *
- * # Safety
- * All pointers must be valid
- */
-enum PQSigningError pq_signature_serialize_bincode(const struct PQSignature *signature,
-                                                   uint8_t *buffer,
-                                                   uintptr_t buffer_len,
-                                                   uintptr_t *written_len);
-
-/**
- * Deserialize signature from bytes
+ * Deserialize signature from bytes using SSZ format
  *
  * # Parameters
  * - `buffer`: buffer with data
@@ -396,24 +383,3 @@ enum PQSigningError pq_signature_serialize_bincode(const struct PQSignature *sig
 enum PQSigningError pq_signature_deserialize(const uint8_t *buffer,
                                              uintptr_t buffer_len,
                                              struct PQSignature **signature_out);
-
-/**
- * Deserialize signature from bincode-format bytes
- *
- * This function deserializes signatures using bincode format
- * (compatible with Zeam's hashsig-glue serialization).
- *
- * # Parameters
- * - `buffer`: buffer with bincode-serialized data
- * - `buffer_len`: buffer size
- * - `signature_out`: pointer to write signature (output)
- *
- * # Returns
- * Error code
- *
- * # Safety
- * All pointers must be valid
- */
-enum PQSigningError pq_signature_deserialize_bincode(const uint8_t *buffer,
-                                                     uintptr_t buffer_len,
-                                                     struct PQSignature **signature_out);

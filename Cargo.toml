@@ -6,11 +6,15 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
+[features]
+default = ["signature-scheme-prod"]
+signature-scheme-prod = []
+signature-scheme-test = []
+
 [dependencies]
-hashsig = { git = "https://github.com/b-wagn/hash-sig" }
+leansig = { git = "https://github.com/leanEthereum/leanSig.git", rev = "397e7cc9bf405d788bfd34cee9fe8b427a464074" }
 rand = "0.9"
-bincode = { version = "2.0.1", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
+serde = "1"
 serde_json = "1"
 
 [build-dependencies]

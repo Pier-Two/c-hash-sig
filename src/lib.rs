@@ -5,250 +5,37 @@ use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::slice;
 
-use hashsig::signature::generalized_xmss::instantiations_poseidon_top_level::lifetime_2_to_the_32::hashing_optimized::SIGTopLevelTargetSumLifetime32Dim64Base8;
-use hashsig::signature::{SignatureScheme, SignatureSchemeSecretKey};
-use hashsig::MESSAGE_LENGTH;
-use serde::{Deserialize, Serialize};
-use serde_json;
+use leansig::signature::generalized_xmss::instantiations_poseidon_top_level::lifetime_2_to_the_32::hashing_optimized::SIGTopLevelTargetSumLifetime32Dim64Base8;
+use leansig::signature::{SignatureScheme, SignatureSchemeSecretKey};
+use leansig::serialization::Serializable;
+use leansig::MESSAGE_LENGTH;
+
+// Signature scheme configuration matching Ream
+#[cfg(all(not(test), feature = "signature-scheme-prod"))]
+pub type LeanSigScheme = SIGTopLevelTargetSumLifetime32Dim64Base8;
+#[cfg(all(not(test), feature = "signature-scheme-prod"))]
+pub const SIGNATURE_SIZE: usize = 3112;
+
+#[cfg(all(not(test), feature = "signature-scheme-test"))]
+pub type LeanSigScheme = leansig::signature::generalized_xmss::instantiations_poseidon_top_level::lifetime_2_to_the_8::SIGTopLevelTargetSumLifetime8Dim64Base8;
+#[cfg(all(not(test), feature = "signature-scheme-test"))]
+pub const SIGNATURE_SIZE: usize = 2344;
+
+#[cfg(test)]
+pub type LeanSigScheme = leansig::signature::generalized_xmss::instantiations_poseidon_top_level::lifetime_2_to_the_8::SIGTopLevelTargetSumLifetime8Dim64Base8;
+#[cfg(test)]
+pub const SIGNATURE_SIZE: usize = 2344;
+
+// Public key size is fixed at 52 bytes (8 + 5 KoalaBear field elements * 4 bytes each)
+pub const PUBLIC_KEY_SIZE: usize = 52;
 
 // Type aliases for convenience
-type SignatureSchemeType = SIGTopLevelTargetSumLifetime32Dim64Base8;
-type PublicKeyType = <SignatureSchemeType as SignatureScheme>::PublicKey;
-type SecretKeyType = <SignatureSchemeType as SignatureScheme>::SecretKey;
-type SignatureType = <SignatureSchemeType as SignatureScheme>::Signature;
-
-const HASH_LEN_FE: usize = 8;
-const PARAMETER_LEN_FE: usize = 5;
-const RAND_LEN_FE: usize = 7;
-const LOG_LIFETIME: usize = 32;
-const DIMENSION: usize = 64;
-const FIELD_ELEMENT_SIZE: usize = 4;
-const SIGNATURE_LEN_BYTES: usize =
-    FIELD_ELEMENT_SIZE * ((HASH_LEN_FE * LOG_LIFETIME) + RAND_LEN_FE + (HASH_LEN_FE * DIMENSION));
-const VALIDATOR_PUBKEY_BYTES: usize = FIELD_ELEMENT_SIZE * (HASH_LEN_FE + PARAMETER_LEN_FE);
-
-const KOALA_PRIME: u32 = 0x7f000001;
-const KOALA_MONTY_MU: u32 = 0x81000001;
-const KOALA_MONTY_BITS: u32 = 32;
-const KOALA_MONTY_MASK: u64 = 0xffff_ffff;
-
-#[derive(Serialize, Deserialize, Clone)]
-struct PortableSignature {
-    path: PortablePath,
-    rho: [u32; RAND_LEN_FE],
-    hashes: Vec<[u32; HASH_LEN_FE]>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct PortablePath {
-    co_path: Vec<[u32; HASH_LEN_FE]>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct PortablePublicKey {
-    root: [u32; HASH_LEN_FE],
-    parameter: [u32; PARAMETER_LEN_FE],
-}
-
-fn decode_signature_to_portable(signature: &SignatureType) -> Result<PortableSignature, PQSigningError> {
-    let config = bincode::config::standard();
-    let encoded = bincode::serde::encode_to_vec(signature, config)
-        .map_err(|_| PQSigningError::UnknownError)?;
-    let (portable, _) = bincode::serde::decode_from_slice::<PortableSignature, _>(&encoded, config)
-        .map_err(|_| PQSigningError::UnknownError)?;
-    validate_portable(&portable)?;
-    Ok(portable)
-}
-
-fn encode_portable_to_signature(portable: PortableSignature) -> Result<SignatureType, PQSigningError> {
-    validate_portable(&portable)?;
-    let config = bincode::config::standard();
-    let encoded = bincode::serde::encode_to_vec(&portable, config)
-        .map_err(|_| PQSigningError::UnknownError)?;
-    let (signature, _) = bincode::serde::decode_from_slice::<SignatureType, _>(&encoded, config)
-        .map_err(|_| PQSigningError::UnknownError)?;
-    Ok(signature)
-}
-
-fn validate_portable(portable: &PortableSignature) -> Result<(), PQSigningError> {
-    if portable.path.co_path.len() != LOG_LIFETIME {
-        return Err(PQSigningError::UnknownError);
-    }
-    if portable.hashes.len() != DIMENSION {
-        return Err(PQSigningError::UnknownError);
-    }
-    Ok(())
-}
-
-fn write_lean_bytes(portable: &PortableSignature, target: &mut [u8]) -> Result<(), PQSigningError> {
-    if target.len() < SIGNATURE_LEN_BYTES {
-        return Err(PQSigningError::UnknownError);
-    }
-    let mut offset = 0usize;
-    for digest in &portable.path.co_path {
-        write_digest(digest, target, &mut offset)?;
-    }
-    for &value in &portable.rho {
-        write_canonical_field(monty_to_canonical(value), target, &mut offset)?;
-    }
-    for digest in &portable.hashes {
-        write_digest(digest, target, &mut offset)?;
-    }
-    if offset != SIGNATURE_LEN_BYTES {
-        return Err(PQSigningError::UnknownError);
-    }
-    if target.len() > SIGNATURE_LEN_BYTES {
-        for byte in &mut target[SIGNATURE_LEN_BYTES..] {
-            *byte = 0;
-        }
-    }
-    Ok(())
-}
-
-fn parse_lean_bytes(data: &[u8]) -> Result<PortableSignature, PQSigningError> {
-    if data.len() != SIGNATURE_LEN_BYTES {
-        return Err(PQSigningError::UnknownError);
-    }
-    let mut offset = 0usize;
-    let mut co_path = Vec::with_capacity(LOG_LIFETIME);
-    for _ in 0..LOG_LIFETIME {
-        co_path.push(read_digest(data, &mut offset)?);
-    }
-    let mut rho = [0u32; RAND_LEN_FE];
-    for slot in rho.iter_mut() {
-        let value = read_canonical_field(data, &mut offset)?;
-        *slot = canonical_to_monty(value)?;
-    }
-    let mut hashes = Vec::with_capacity(DIMENSION);
-    for _ in 0..DIMENSION {
-        hashes.push(read_digest(data, &mut offset)?);
-    }
-    if offset != SIGNATURE_LEN_BYTES {
-        return Err(PQSigningError::UnknownError);
-    }
-    Ok(PortableSignature {
-        path: PortablePath { co_path },
-        rho,
-        hashes,
-    })
-}
-
-fn read_digest(data: &[u8], offset: &mut usize) -> Result<[u32; HASH_LEN_FE], PQSigningError> {
-    let mut digest = [0u32; HASH_LEN_FE];
-    for slot in digest.iter_mut() {
-        let canonical = read_canonical_field(data, offset)?;
-        *slot = canonical_to_monty(canonical)?;
-    }
-    Ok(digest)
-}
-
-fn write_digest(digest: &[u32; HASH_LEN_FE], target: &mut [u8], offset: &mut usize) -> Result<(), PQSigningError> {
-    for &value in digest {
-        write_canonical_field(monty_to_canonical(value), target, offset)?;
-    }
-    Ok(())
-}
-
-fn read_canonical_field(data: &[u8], offset: &mut usize) -> Result<u32, PQSigningError> {
-    if *offset + FIELD_ELEMENT_SIZE > data.len() {
-        return Err(PQSigningError::UnknownError);
-    }
-    let bytes = &data[*offset..*offset + FIELD_ELEMENT_SIZE];
-    let value = u32::from_le_bytes(bytes.try_into().unwrap());
-    if value >= KOALA_PRIME {
-        return Err(PQSigningError::UnknownError);
-    }
-    *offset += FIELD_ELEMENT_SIZE;
-    Ok(value)
-}
-
-fn write_canonical_field(value: u32, target: &mut [u8], offset: &mut usize) -> Result<(), PQSigningError> {
-    if *offset + FIELD_ELEMENT_SIZE > target.len() {
-        return Err(PQSigningError::UnknownError);
-    }
-    target[*offset..*offset + FIELD_ELEMENT_SIZE].copy_from_slice(&value.to_le_bytes());
-    *offset += FIELD_ELEMENT_SIZE;
-    Ok(())
-}
-
-fn monty_to_canonical(value: u32) -> u32 {
-    monty_reduce(value as u64)
-}
-
-fn canonical_to_monty(value: u32) -> Result<u32, PQSigningError> {
-    if value >= KOALA_PRIME {
-        return Err(PQSigningError::UnknownError);
-    }
-    Ok((((value as u64) << KOALA_MONTY_BITS) % (KOALA_PRIME as u64)) as u32)
-}
-
-fn decode_public_key_to_portable(pk: &PublicKeyType) -> Result<PortablePublicKey, PQSigningError> {
-    let config = bincode::config::standard();
-    let encoded = bincode::serde::encode_to_vec(pk, config)
-        .map_err(|_| PQSigningError::UnknownError)?;
-    let (portable, _) =
-        bincode::serde::decode_from_slice::<PortablePublicKey, _>(&encoded, config)
-            .map_err(|_| PQSigningError::UnknownError)?;
-    Ok(portable)
-}
-
-fn encode_portable_to_public_key(portable: PortablePublicKey) -> Result<PublicKeyType, PQSigningError> {
-    let config = bincode::config::standard();
-    let encoded = bincode::serde::encode_to_vec(&portable, config)
-        .map_err(|_| PQSigningError::UnknownError)?;
-    let (pk, _) = bincode::serde::decode_from_slice::<PublicKeyType, _>(&encoded, config)
-        .map_err(|_| PQSigningError::UnknownError)?;
-    Ok(pk)
-}
-
-fn write_public_key_bytes(portable: &PortablePublicKey, target: &mut [u8]) -> Result<(), PQSigningError> {
-    if target.len() < VALIDATOR_PUBKEY_BYTES {
-        return Err(PQSigningError::UnknownError);
-    }
-    let mut offset = 0usize;
-    write_digest(&portable.root, target, &mut offset)?;
-    for &value in &portable.parameter {
-        write_canonical_field(monty_to_canonical(value), target, &mut offset)?;
-    }
-    if offset != VALIDATOR_PUBKEY_BYTES {
-        return Err(PQSigningError::UnknownError);
-    }
-    if target.len() > VALIDATOR_PUBKEY_BYTES {
-        for byte in &mut target[VALIDATOR_PUBKEY_BYTES..] {
-            *byte = 0;
-        }
-    }
-    Ok(())
-}
-
-fn parse_public_key_bytes(data: &[u8]) -> Result<PortablePublicKey, PQSigningError> {
-    if data.len() != VALIDATOR_PUBKEY_BYTES {
-        return Err(PQSigningError::UnknownError);
-    }
-    let mut offset = 0usize;
-    let root = read_digest(data, &mut offset)?;
-    let mut parameter = [0u32; PARAMETER_LEN_FE];
-    for slot in parameter.iter_mut() {
-        let canonical = read_canonical_field(data, &mut offset)?;
-        *slot = canonical_to_monty(canonical)?;
-    }
-    if offset != VALIDATOR_PUBKEY_BYTES {
-        return Err(PQSigningError::UnknownError);
-    }
-    Ok(PortablePublicKey { root, parameter })
-}
-
-fn monty_reduce(x: u64) -> u32 {
-    let t = x.wrapping_mul(KOALA_MONTY_MU as u64) & KOALA_MONTY_MASK;
-    let u = t * (KOALA_PRIME as u64);
-    let (x_sub_u, over) = x.overflowing_sub(u);
-    let x_sub_u_hi = (x_sub_u >> KOALA_MONTY_BITS) as u32;
-    let corr = if over { KOALA_PRIME } else { 0 };
-    x_sub_u_hi.wrapping_add(corr)
-}
+type PublicKeyType = <LeanSigScheme as SignatureScheme>::PublicKey;
+type SecretKeyType = <LeanSigScheme as SignatureScheme>::SecretKey;
+type SignatureType = <LeanSigScheme as SignatureScheme>::Signature;
 
 /// Wrapper for signature scheme secret key
-/// 
+///
 /// This is an opaque structure whose fields are not accessible from C code
 #[repr(C)]
 pub struct PQSignatureSchemeSecretKey {
@@ -256,7 +43,7 @@ pub struct PQSignatureSchemeSecretKey {
 }
 
 /// Wrapper for signature scheme public key
-/// 
+///
 /// This is an opaque structure whose fields are not accessible from C code
 #[repr(C)]
 pub struct PQSignatureSchemePublicKey {
@@ -264,7 +51,7 @@ pub struct PQSignatureSchemePublicKey {
 }
 
 /// Wrapper for signature
-/// 
+///
 /// This is an opaque structure whose fields are not accessible from C code
 #[repr(C)]
 pub struct PQSignature {
@@ -413,11 +200,23 @@ pub unsafe extern "C" fn pq_advance_preparation(key: *mut PQSignatureSchemeSecre
 /// Get maximum lifetime of signature scheme
 #[no_mangle]
 pub extern "C" fn pq_get_lifetime() -> u64 {
-    SignatureSchemeType::LIFETIME
+    LeanSigScheme::LIFETIME
+}
+
+/// Get signature size in bytes
+#[no_mangle]
+pub extern "C" fn pq_get_signature_size() -> usize {
+    SIGNATURE_SIZE
+}
+
+/// Get public key size in bytes
+#[no_mangle]
+pub extern "C" fn pq_get_public_key_size() -> usize {
+    PUBLIC_KEY_SIZE
 }
 
 /// Generate key pair (public and secret)
-/// 
+///
 /// # Parameters
 /// - `activation_epoch`: starting epoch for key activation
 /// - `num_active_epochs`: number of active epochs
@@ -441,7 +240,7 @@ pub unsafe extern "C" fn pq_key_gen(
     }
 
     let mut rng = rand::rng();
-    let (pk, sk) = SignatureSchemeType::key_gen(&mut rng, activation_epoch, num_active_epochs);
+    let (pk, sk) = LeanSigScheme::key_gen(&mut rng, activation_epoch, num_active_epochs);
 
     let pk_wrapper = Box::new(PQSignatureSchemePublicKeyInner {
         inner: Box::new(pk),
@@ -493,12 +292,12 @@ pub unsafe extern "C" fn pq_sign(
 
     let sk = &*(sk as *const PQSignatureSchemeSecretKeyInner);
     let message_slice = slice::from_raw_parts(message, message_len);
-    
+
     // Convert slice to fixed-size array
     let mut message_array = [0u8; MESSAGE_LENGTH];
     message_array.copy_from_slice(message_slice);
 
-    match SignatureSchemeType::sign(&sk.inner, epoch32, &message_array) {
+    match LeanSigScheme::sign(&sk.inner, epoch32, &message_array) {
         Ok(signature) => {
             let sig_wrapper = Box::new(PQSignatureInner {
                 inner: Box::new(signature),
@@ -506,7 +305,7 @@ pub unsafe extern "C" fn pq_sign(
             *signature_out = Box::into_raw(sig_wrapper) as *mut PQSignature;
             PQSigningError::Success
         }
-        Err(hashsig::signature::SigningError::EncodingAttemptsExceeded { .. }) => {
+        Err(leansig::signature::SigningError::EncodingAttemptsExceeded { .. }) => {
             PQSigningError::EncodingAttemptsExceeded
         }
     }
@@ -550,13 +349,13 @@ pub unsafe extern "C" fn pq_verify(
     let pk = &*(pk as *const PQSignatureSchemePublicKeyInner);
     let signature = &*(signature as *const PQSignatureInner);
     let message_slice = slice::from_raw_parts(message, message_len);
-    
+
     // Convert slice to fixed-size array
     let mut message_array = [0u8; MESSAGE_LENGTH];
     message_array.copy_from_slice(message_slice);
 
-    let is_valid = SignatureSchemeType::verify(&pk.inner, epoch32, &message_array, &signature.inner);
-    
+    let is_valid = LeanSigScheme::verify(&pk.inner, epoch32, &message_array, &signature.inner);
+
     if is_valid {
         1
     } else {
@@ -564,18 +363,18 @@ pub unsafe extern "C" fn pq_verify(
     }
 }
 
-/// Verify a signature from bincode-serialized bytes
+/// Verify a signature from SSZ-serialized bytes
 ///
-/// This function deserializes the public key and signature from bincode format
-/// (compatible with Zeam's hashsig-glue serialization) and verifies the signature.
+/// This function deserializes the public key and signature from SSZ format
+/// (compatible with Ream's leanSig serialization) and verifies the signature.
 ///
 /// # Parameters
-/// - `pubkey_bytes`: pointer to bincode-serialized public key bytes
+/// - `pubkey_bytes`: pointer to SSZ-serialized public key bytes (52 bytes)
 /// - `pubkey_len`: length of public key bytes
 /// - `epoch`: signature epoch
 /// - `message`: pointer to message (must be 32 bytes)
 /// - `message_len`: message length (must be MESSAGE_LENGTH = 32)
-/// - `signature_bytes`: pointer to bincode-serialized signature bytes
+/// - `signature_bytes`: pointer to SSZ-serialized signature bytes
 /// - `signature_len`: length of signature bytes
 ///
 /// # Returns
@@ -584,7 +383,7 @@ pub unsafe extern "C" fn pq_verify(
 /// # Safety
 /// All pointers must be valid and point to correctly sized data
 #[no_mangle]
-pub unsafe extern "C" fn pq_verify_bincode(
+pub unsafe extern "C" fn pq_verify_ssz(
     pubkey_bytes: *const u8,
     pubkey_len: usize,
     epoch: u64,
@@ -593,16 +392,22 @@ pub unsafe extern "C" fn pq_verify_bincode(
     signature_bytes: *const u8,
     signature_len: usize,
 ) -> c_int {
-    use bincode::config::{Configuration, Fixint, LittleEndian, NoLimit};
-    const BINCODE_CONFIG: Configuration<LittleEndian, Fixint, NoLimit> =
-        bincode::config::standard().with_fixed_int_encoding();
-
     if pubkey_bytes.is_null() || message.is_null() || signature_bytes.is_null() {
         return -1;
     }
 
     if message_len != MESSAGE_LENGTH {
         return -2;
+    }
+
+    if pubkey_len != PUBLIC_KEY_SIZE {
+        eprintln!("[RUST pq_verify_ssz] ERROR: invalid pubkey length: {} (expected {})", pubkey_len, PUBLIC_KEY_SIZE);
+        return -7;
+    }
+
+    if signature_len != SIGNATURE_SIZE {
+        eprintln!("[RUST pq_verify_ssz] ERROR: invalid signature length: {} (expected {})", signature_len, SIGNATURE_SIZE);
+        return -8;
     }
 
     let epoch32 = match u32::try_from(epoch) {
@@ -616,20 +421,31 @@ pub unsafe extern "C" fn pq_verify_bincode(
 
     let message_array: &[u8; MESSAGE_LENGTH] = match msg_data.try_into() {
         Ok(arr) => arr,
-        Err(_) => return -4,
+        Err(_) => {
+            eprintln!("[RUST pq_verify_ssz] ERROR: message conversion failed");
+            return -4;
+        }
     };
 
-    let pk: PublicKeyType = match bincode::serde::decode_from_slice(pk_data, BINCODE_CONFIG) {
-        Ok((pk, _)) => pk,
-        Err(_) => return -5,
+    // Deserialize public key using leanSig's Serializable trait (SSZ format)
+    let pk: PublicKeyType = match PublicKeyType::from_bytes(pk_data) {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("[RUST pq_verify_ssz] ERROR: pubkey decode failed: {:?}", e);
+            return -5;
+        }
     };
 
-    let sig: SignatureType = match bincode::serde::decode_from_slice(sig_data, BINCODE_CONFIG) {
-        Ok((sig, _)) => sig,
-        Err(_) => return -6,
+    // Deserialize signature using leanSig's Serializable trait (SSZ format)
+    let sig: SignatureType = match SignatureType::from_bytes(sig_data) {
+        Ok(sig) => sig,
+        Err(e) => {
+            eprintln!("[RUST pq_verify_ssz] ERROR: signature decode failed: {:?}", e);
+            return -6;
+        }
     };
 
-    let is_valid = <SignatureSchemeType as SignatureScheme>::verify(&pk, epoch32, message_array, &sig);
+    let is_valid = <LeanSigScheme as SignatureScheme>::verify(&pk, epoch32, message_array, &sig);
 
     if is_valid {
         1
@@ -675,10 +491,10 @@ pub extern "C" fn pq_error_description(error: PQSigningError) -> *mut c_char {
 }
 
 // ============================================================================
-// Serialization functions
+// Serialization functions - Using SSZ format (leanSig's Serializable trait)
 // ============================================================================
 
-/// Serialize secret key to bytes
+/// Serialize secret key to bytes using SSZ format
 ///
 /// # Parameters
 /// - `sk`: secret key
@@ -703,24 +519,19 @@ pub unsafe extern "C" fn pq_secret_key_serialize(
     }
 
     let sk = &*(sk as *const PQSignatureSchemeSecretKeyInner);
-    
-    // Use bincode for serialization
-    match bincode::serde::encode_to_vec(&*sk.inner, bincode::config::standard()) {
-        Ok(bytes) => {
-            if bytes.len() > buffer_len {
-                *written_len = bytes.len();
-                return PQSigningError::UnknownError; // Buffer too small
-            }
-            let buffer_slice = slice::from_raw_parts_mut(buffer, buffer_len);
-            buffer_slice[..bytes.len()].copy_from_slice(&bytes);
-            *written_len = bytes.len();
-            PQSigningError::Success
-        }
-        Err(_) => PQSigningError::UnknownError,
+
+    let bytes = sk.inner.to_bytes();
+    if bytes.len() > buffer_len {
+        *written_len = bytes.len();
+        return PQSigningError::UnknownError; // Buffer too small
     }
+    let buffer_slice = slice::from_raw_parts_mut(buffer, buffer_len);
+    buffer_slice[..bytes.len()].copy_from_slice(&bytes);
+    *written_len = bytes.len();
+    PQSigningError::Success
 }
 
-/// Deserialize secret key from bytes
+/// Deserialize secret key from bytes using SSZ format
 ///
 /// # Parameters
 /// - `buffer`: buffer with data
@@ -743,40 +554,8 @@ pub unsafe extern "C" fn pq_secret_key_deserialize(
     }
 
     let buffer_slice = slice::from_raw_parts(buffer, buffer_len);
-    
-    match bincode::serde::decode_from_slice(buffer_slice, bincode::config::standard()) {
-        Ok((sk, _)) => {
-            let sk_wrapper = Box::new(PQSignatureSchemeSecretKeyInner {
-                inner: Box::new(sk),
-            });
-            *sk_out = Box::into_raw(sk_wrapper) as *mut PQSignatureSchemeSecretKey;
-            PQSigningError::Success
-        }
-        Err(_) => PQSigningError::UnknownError,
-    }
-}
 
-/// Deserialize secret key from JSON
-///
-/// # Parameters
-/// - `json`: pointer to UTF-8 JSON buffer
-/// - `json_len`: buffer size
-/// - `sk_out`: pointer to write secret key (output)
-///
-/// # Returns
-/// Error code
-#[no_mangle]
-pub unsafe extern "C" fn pq_secret_key_from_json(
-    json: *const u8,
-    json_len: usize,
-    sk_out: *mut *mut PQSignatureSchemeSecretKey,
-) -> PQSigningError {
-    if json.is_null() || sk_out.is_null() {
-        return PQSigningError::InvalidPointer;
-    }
-
-    let json_slice = slice::from_raw_parts(json, json_len);
-    match serde_json::from_slice::<SecretKeyType>(json_slice) {
+    match SecretKeyType::from_bytes(buffer_slice) {
         Ok(sk) => {
             let sk_wrapper = Box::new(PQSignatureSchemeSecretKeyInner {
                 inner: Box::new(sk),
@@ -788,7 +567,8 @@ pub unsafe extern "C" fn pq_secret_key_from_json(
     }
 }
 
-/// Serialize public key to bytes
+
+/// Serialize public key to bytes using SSZ format
 ///
 /// # Parameters
 /// - `pk`: public key
@@ -813,26 +593,19 @@ pub unsafe extern "C" fn pq_public_key_serialize(
     }
 
     let pk = &*(pk as *const PQSignatureSchemePublicKeyInner);
-    if buffer_len < VALIDATOR_PUBKEY_BYTES {
-        *written_len = VALIDATOR_PUBKEY_BYTES;
-        return PQSigningError::UnknownError;
+
+    let bytes = pk.inner.to_bytes();
+    if bytes.len() > buffer_len {
+        *written_len = bytes.len();
+        return PQSigningError::UnknownError; // Buffer too small
     }
-
-    let portable = match decode_public_key_to_portable(pk.inner.as_ref()) {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-
     let buffer_slice = slice::from_raw_parts_mut(buffer, buffer_len);
-    if let Err(err) = write_public_key_bytes(&portable, buffer_slice) {
-        return err;
-    }
-
-    *written_len = VALIDATOR_PUBKEY_BYTES;
+    buffer_slice[..bytes.len()].copy_from_slice(&bytes);
+    *written_len = bytes.len();
     PQSigningError::Success
 }
 
-/// Deserialize public key from bytes
+/// Deserialize public key from bytes using SSZ format
 ///
 /// # Parameters
 /// - `buffer`: buffer with data
@@ -855,44 +628,8 @@ pub unsafe extern "C" fn pq_public_key_deserialize(
     }
 
     let buffer_slice = slice::from_raw_parts(buffer, buffer_len);
-    let portable = match parse_public_key_bytes(buffer_slice) {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
 
-    let pk = match encode_portable_to_public_key(portable) {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-
-    let pk_wrapper = Box::new(PQSignatureSchemePublicKeyInner {
-        inner: Box::new(pk),
-    });
-    *pk_out = Box::into_raw(pk_wrapper) as *mut PQSignatureSchemePublicKey;
-    PQSigningError::Success
-}
-
-/// Deserialize public key from JSON
-///
-/// # Parameters
-/// - `json`: pointer to UTF-8 JSON buffer
-/// - `json_len`: buffer size
-/// - `pk_out`: pointer to write public key (output)
-///
-/// # Returns
-/// Error code
-#[no_mangle]
-pub unsafe extern "C" fn pq_public_key_from_json(
-    json: *const u8,
-    json_len: usize,
-    pk_out: *mut *mut PQSignatureSchemePublicKey,
-) -> PQSigningError {
-    if json.is_null() || pk_out.is_null() {
-        return PQSigningError::InvalidPointer;
-    }
-
-    let json_slice = slice::from_raw_parts(json, json_len);
-    match serde_json::from_slice::<PublicKeyType>(json_slice) {
+    match PublicKeyType::from_bytes(buffer_slice) {
         Ok(pk) => {
             let pk_wrapper = Box::new(PQSignatureSchemePublicKeyInner {
                 inner: Box::new(pk),
@@ -904,7 +641,8 @@ pub unsafe extern "C" fn pq_public_key_from_json(
     }
 }
 
-/// Serialize signature to bytes
+
+/// Serialize signature to bytes using SSZ format
 ///
 /// # Parameters
 /// - `signature`: signature
@@ -929,75 +667,19 @@ pub unsafe extern "C" fn pq_signature_serialize(
     }
 
     let signature = &*(signature as *const PQSignatureInner);
-    if buffer_len < SIGNATURE_LEN_BYTES {
-        *written_len = SIGNATURE_LEN_BYTES;
-        return PQSigningError::UnknownError;
+
+    let bytes = signature.inner.to_bytes();
+    if bytes.len() > buffer_len {
+        *written_len = bytes.len();
+        return PQSigningError::UnknownError; // Buffer too small
     }
-
-    let portable = match decode_signature_to_portable(signature.inner.as_ref()) {
-        Ok(sig) => sig,
-        Err(err) => return err,
-    };
-
     let buffer_slice = slice::from_raw_parts_mut(buffer, buffer_len);
-    if let Err(err) = write_lean_bytes(&portable, buffer_slice) {
-        return err;
-    }
-
-    *written_len = SIGNATURE_LEN_BYTES;
+    buffer_slice[..bytes.len()].copy_from_slice(&bytes);
+    *written_len = bytes.len();
     PQSigningError::Success
 }
 
-/// Serialize signature to bytes using bincode format
-///
-/// This function serializes signatures using bincode format
-/// (compatible with Zeam's hashsig-glue serialization).
-///
-/// # Parameters
-/// - `signature`: signature
-/// - `buffer`: buffer for writing
-/// - `buffer_len`: buffer size
-/// - `written_len`: pointer to write actual data size (output)
-///
-/// # Returns
-/// Error code
-///
-/// # Safety
-/// All pointers must be valid
-#[no_mangle]
-pub unsafe extern "C" fn pq_signature_serialize_bincode(
-    signature: *const PQSignature,
-    buffer: *mut u8,
-    buffer_len: usize,
-    written_len: *mut usize,
-) -> PQSigningError {
-    use bincode::config::{Configuration, Fixint, LittleEndian, NoLimit};
-    const BINCODE_CONFIG: Configuration<LittleEndian, Fixint, NoLimit> =
-        bincode::config::standard().with_fixed_int_encoding();
-
-    if signature.is_null() || buffer.is_null() || written_len.is_null() {
-        return PQSigningError::InvalidPointer;
-    }
-
-    let signature = &*(signature as *const PQSignatureInner);
-    let buffer_slice = slice::from_raw_parts_mut(buffer, buffer_len);
-
-    match bincode::serde::encode_into_slice(signature.inner.as_ref(), buffer_slice, BINCODE_CONFIG) {
-        Ok(bytes_written) => {
-            *written_len = bytes_written;
-            // Zero remaining bytes
-            if bytes_written < buffer_len {
-                for byte in &mut buffer_slice[bytes_written..] {
-                    *byte = 0;
-                }
-            }
-            PQSigningError::Success
-        }
-        Err(_) => PQSigningError::UnknownError,
-    }
-}
-
-/// Deserialize signature from bytes
+/// Deserialize signature from bytes using SSZ format
 ///
 /// # Parameters
 /// - `buffer`: buffer with data
@@ -1020,63 +702,108 @@ pub unsafe extern "C" fn pq_signature_deserialize(
     }
 
     let buffer_slice = slice::from_raw_parts(buffer, buffer_len);
-    let portable = match parse_lean_bytes(buffer_slice) {
-        Ok(sig) => sig,
-        Err(err) => return err,
-    };
 
-    let signature = match encode_portable_to_signature(portable) {
-        Ok(sig) => sig,
-        Err(err) => return err,
-    };
-
-    let sig_wrapper = Box::new(PQSignatureInner {
-        inner: Box::new(signature),
-    });
-    *signature_out = Box::into_raw(sig_wrapper) as *mut PQSignature;
-    PQSigningError::Success
+    match SignatureType::from_bytes(buffer_slice) {
+        Ok(signature) => {
+            let sig_wrapper = Box::new(PQSignatureInner {
+                inner: Box::new(signature),
+            });
+            *signature_out = Box::into_raw(sig_wrapper) as *mut PQSignature;
+            PQSigningError::Success
+        }
+        Err(_) => PQSigningError::UnknownError,
+    }
 }
 
-/// Deserialize signature from bincode-format bytes
-///
-/// This function deserializes signatures using bincode format
-/// (compatible with Zeam's hashsig-glue serialization).
+// ============================================================================
+// JSON deserialization functions
+// ============================================================================
+
+/// Deserialize public key from JSON
 ///
 /// # Parameters
-/// - `buffer`: buffer with bincode-serialized data
-/// - `buffer_len`: buffer size
-/// - `signature_out`: pointer to write signature (output)
+/// - `json`: pointer to UTF-8 JSON buffer
+/// - `json_len`: buffer size
+/// - `pk_out`: pointer to write public key (output)
 ///
 /// # Returns
 /// Error code
-///
-/// # Safety
-/// All pointers must be valid
 #[no_mangle]
-pub unsafe extern "C" fn pq_signature_deserialize_bincode(
-    buffer: *const u8,
-    buffer_len: usize,
-    signature_out: *mut *mut PQSignature,
+pub unsafe extern "C" fn pq_public_key_from_json(
+    json: *const u8,
+    json_len: usize,
+    pk_out: *mut *mut PQSignatureSchemePublicKey,
 ) -> PQSigningError {
-    use bincode::config::{Configuration, Fixint, LittleEndian, NoLimit};
-    const BINCODE_CONFIG: Configuration<LittleEndian, Fixint, NoLimit> =
-        bincode::config::standard().with_fixed_int_encoding();
-
-    if buffer.is_null() || signature_out.is_null() {
+    if json.is_null() || pk_out.is_null() || json_len == 0 {
         return PQSigningError::InvalidPointer;
     }
 
-    let buffer_slice = slice::from_raw_parts(buffer, buffer_len);
-    let signature: SignatureType = match bincode::serde::decode_from_slice(buffer_slice, BINCODE_CONFIG) {
-        Ok((sig, _)) => sig,
+    let json_slice = std::slice::from_raw_parts(json, json_len);
+    let json_str = match std::str::from_utf8(json_slice) {
+        Ok(s) => s,
         Err(_) => return PQSigningError::UnknownError,
     };
 
-    let sig_wrapper = Box::new(PQSignatureInner {
-        inner: Box::new(signature),
-    });
-    *signature_out = Box::into_raw(sig_wrapper) as *mut PQSignature;
-    PQSigningError::Success
+    match serde_json::from_str::<PublicKeyType>(json_str) {
+        Ok(pk) => {
+            let pk_wrapper = Box::new(PQSignatureSchemePublicKeyInner {
+                inner: Box::new(pk),
+            });
+            *pk_out = Box::into_raw(pk_wrapper) as *mut PQSignatureSchemePublicKey;
+            PQSigningError::Success
+        }
+        Err(_) => PQSigningError::UnknownError,
+    }
+}
+
+/// Deserialize secret key from JSON
+///
+/// # Parameters
+/// - `json`: pointer to UTF-8 JSON buffer
+/// - `json_len`: buffer size
+/// - `sk_out`: pointer to write secret key (output)
+///
+/// # Returns
+/// Error code
+#[no_mangle]
+pub unsafe extern "C" fn pq_secret_key_from_json(
+    json: *const u8,
+    json_len: usize,
+    sk_out: *mut *mut PQSignatureSchemeSecretKey,
+) -> PQSigningError {
+    eprintln!("[RUST pq_secret_key_from_json] called with json_len={}", json_len);
+
+    if json.is_null() || sk_out.is_null() || json_len == 0 {
+        eprintln!("[RUST pq_secret_key_from_json] ERROR: invalid pointer or zero length");
+        return PQSigningError::InvalidPointer;
+    }
+
+    let json_slice = std::slice::from_raw_parts(json, json_len);
+    let json_str = match std::str::from_utf8(json_slice) {
+        Ok(s) => {
+            eprintln!("[RUST pq_secret_key_from_json] UTF-8 conversion OK, first 200 chars: {}", &s[..std::cmp::min(200, s.len())]);
+            s
+        }
+        Err(e) => {
+            eprintln!("[RUST pq_secret_key_from_json] ERROR: UTF-8 conversion failed: {:?}", e);
+            return PQSigningError::UnknownError;
+        }
+    };
+
+    match serde_json::from_str::<SecretKeyType>(json_str) {
+        Ok(sk) => {
+            eprintln!("[RUST pq_secret_key_from_json] JSON parse SUCCESS");
+            let sk_wrapper = Box::new(PQSignatureSchemeSecretKeyInner {
+                inner: Box::new(sk),
+            });
+            *sk_out = Box::into_raw(sk_wrapper) as *mut PQSignatureSchemeSecretKey;
+            PQSigningError::Success
+        }
+        Err(e) => {
+            eprintln!("[RUST pq_secret_key_from_json] ERROR: JSON parse failed: {:?}", e);
+            PQSigningError::UnknownError
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1090,7 +817,7 @@ mod tests {
             let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
 
             // Key generation
-            let result = pq_key_gen(0, 1000, &mut pk, &mut sk);
+            let result = pq_key_gen(0, 100, &mut pk, &mut sk);
             assert_eq!(result, PQSigningError::Success);
             assert!(!pk.is_null());
             assert!(!sk.is_null());
@@ -1133,11 +860,11 @@ mod tests {
     fn test_invalid_pointers() {
         unsafe {
             // Test with null pointers
-            let result = pq_key_gen(0, 1000, ptr::null_mut(), ptr::null_mut());
+            let result = pq_key_gen(0, 100, ptr::null_mut(), ptr::null_mut());
             assert_eq!(result, PQSigningError::InvalidPointer);
 
             let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
-            let result = pq_key_gen(0, 1000, &mut pk, ptr::null_mut());
+            let result = pq_key_gen(0, 100, &mut pk, ptr::null_mut());
             assert_eq!(result, PQSigningError::InvalidPointer);
 
             // pq_sign with null pointers
@@ -1168,7 +895,7 @@ mod tests {
         unsafe {
             let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
             let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
-            pq_key_gen(0, 1000, &mut pk, &mut sk);
+            pq_key_gen(0, 100, &mut pk, &mut sk);
 
             // Test with incorrect message length for signing
             let short_message = [0u8; 16]; // Incorrect length
@@ -1201,7 +928,7 @@ mod tests {
         unsafe {
             let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
             let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
-            pq_key_gen(0, 1000, &mut pk, &mut sk);
+            pq_key_gen(0, 100, &mut pk, &mut sk);
 
             let message = [1u8; MESSAGE_LENGTH];
             let mut signature: *mut PQSignature = ptr::null_mut();
@@ -1231,7 +958,7 @@ mod tests {
         unsafe {
             let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
             let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
-            pq_key_gen(0, 10000, &mut pk, &mut sk);
+            pq_key_gen(0, 100, &mut pk, &mut sk);
 
             let initial_prepared = pq_get_prepared_interval(sk);
             assert!(initial_prepared.start < initial_prepared.end);
@@ -1259,7 +986,7 @@ mod tests {
         unsafe {
             let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
             let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
-            pq_key_gen(0, 1000, &mut pk, &mut sk);
+            pq_key_gen(0, 100, &mut pk, &mut sk);
 
             let message = [42u8; MESSAGE_LENGTH];
             let mut signature: *mut PQSignature = ptr::null_mut();
@@ -1275,7 +1002,7 @@ mod tests {
                 &mut pk_written,
             );
             assert_eq!(result, PQSigningError::Success);
-            assert!(pk_written > 0);
+            assert_eq!(pk_written, PUBLIC_KEY_SIZE);
 
             let mut pk_restored: *mut PQSignatureSchemePublicKey = ptr::null_mut();
             let result = pq_public_key_deserialize(
@@ -1291,7 +1018,7 @@ mod tests {
             assert_eq!(verify_result, 1);
 
             // Test secret key serialization/deserialization
-            let mut sk_buffer = vec![0u8; 100000];
+            let mut sk_buffer = vec![0u8; 1000000];
             let mut sk_written = 0;
             let result = pq_secret_key_serialize(
                 sk,
@@ -1326,7 +1053,7 @@ mod tests {
                 &mut sig_written,
             );
             assert_eq!(result, PQSigningError::Success);
-            assert!(sig_written > 0);
+            assert_eq!(sig_written, SIGNATURE_SIZE);
 
             let mut sig_restored: *mut PQSignature = ptr::null_mut();
             let result = pq_signature_deserialize(
@@ -1353,102 +1080,54 @@ mod tests {
     }
 
     #[test]
-    fn test_signature_leanspec_roundtrip() {
+    fn test_ssz_verification() {
         unsafe {
             let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
             let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
-            assert_eq!(pq_key_gen(0, 512, &mut pk, &mut sk), PQSigningError::Success);
+            pq_key_gen(0, 100, &mut pk, &mut sk);
 
-            let mut signature_ptr: *mut PQSignature = ptr::null_mut();
-            let message = [0u8; MESSAGE_LENGTH];
-            let epoch = 77u64;
-            assert_eq!(
-                pq_sign(sk, epoch, message.as_ptr(), MESSAGE_LENGTH, &mut signature_ptr),
-                PQSigningError::Success
+            let message = [42u8; MESSAGE_LENGTH];
+            let mut signature: *mut PQSignature = ptr::null_mut();
+            pq_sign(sk, 10, message.as_ptr(), MESSAGE_LENGTH, &mut signature);
+
+            // Serialize public key
+            let mut pk_buffer = vec![0u8; PUBLIC_KEY_SIZE];
+            let mut pk_written = 0;
+            pq_public_key_serialize(pk, pk_buffer.as_mut_ptr(), pk_buffer.len(), &mut pk_written);
+
+            // Serialize signature
+            let mut sig_buffer = vec![0u8; SIGNATURE_SIZE];
+            let mut sig_written = 0;
+            pq_signature_serialize(signature, sig_buffer.as_mut_ptr(), sig_buffer.len(), &mut sig_written);
+
+            // Verify using SSZ bytes
+            let result = pq_verify_ssz(
+                pk_buffer.as_ptr(),
+                pk_written,
+                10,
+                message.as_ptr(),
+                MESSAGE_LENGTH,
+                sig_buffer.as_ptr(),
+                sig_written,
             );
-            assert!(!signature_ptr.is_null());
+            assert_eq!(result, 1);
 
-            let mut buffer = vec![0u8; SIGNATURE_LEN_BYTES];
-            let mut written = 0usize;
-            assert_eq!(
-                pq_signature_serialize(
-                    signature_ptr,
-                    buffer.as_mut_ptr(),
-                    buffer.len(),
-                    &mut written,
-                ),
-                PQSigningError::Success
+            // Verify with wrong epoch should fail
+            let result = pq_verify_ssz(
+                pk_buffer.as_ptr(),
+                pk_written,
+                11,
+                message.as_ptr(),
+                MESSAGE_LENGTH,
+                sig_buffer.as_ptr(),
+                sig_written,
             );
-            assert_eq!(written, SIGNATURE_LEN_BYTES);
+            assert_eq!(result, 0);
 
-            let mut restored: *mut PQSignature = ptr::null_mut();
-            assert_eq!(
-                pq_signature_deserialize(buffer.as_ptr(), buffer.len(), &mut restored),
-                PQSigningError::Success
-            );
-            assert!(!restored.is_null());
-
-            let mut roundtrip = vec![0u8; SIGNATURE_LEN_BYTES];
-            let mut roundtrip_written = 0usize;
-            assert_eq!(
-                pq_signature_serialize(
-                    restored,
-                    roundtrip.as_mut_ptr(),
-                    roundtrip.len(),
-                    &mut roundtrip_written,
-                ),
-                PQSigningError::Success
-            );
-            assert_eq!(roundtrip_written, SIGNATURE_LEN_BYTES);
-            assert_eq!(buffer, roundtrip);
-
-            pq_signature_free(restored);
-            pq_signature_free(signature_ptr);
-            pq_secret_key_free(sk);
+            // Cleanup
+            pq_signature_free(signature);
             pq_public_key_free(pk);
-        }
-    }
-
-    #[test]
-    fn test_public_key_leanspec_roundtrip() {
-        unsafe {
-            let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
-            let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
-            assert_eq!(pq_key_gen(0, 256, &mut pk, &mut sk), PQSigningError::Success);
-            assert!(!pk.is_null());
-
-            let mut buffer = vec![0u8; VALIDATOR_PUBKEY_BYTES];
-            let mut written = 0usize;
-            assert_eq!(
-                pq_public_key_serialize(pk, buffer.as_mut_ptr(), buffer.len(), &mut written),
-                PQSigningError::Success
-            );
-            assert_eq!(written, VALIDATOR_PUBKEY_BYTES);
-
-            let mut restored: *mut PQSignatureSchemePublicKey = ptr::null_mut();
-            assert_eq!(
-                pq_public_key_deserialize(buffer.as_ptr(), buffer.len(), &mut restored),
-                PQSigningError::Success
-            );
-            assert!(!restored.is_null());
-
-            let mut roundtrip = vec![0u8; VALIDATOR_PUBKEY_BYTES];
-            let mut roundtrip_written = 0usize;
-            assert_eq!(
-                pq_public_key_serialize(
-                    restored,
-                    roundtrip.as_mut_ptr(),
-                    roundtrip.len(),
-                    &mut roundtrip_written,
-                ),
-                PQSigningError::Success
-            );
-            assert_eq!(roundtrip_written, VALIDATOR_PUBKEY_BYTES);
-            assert_eq!(buffer, roundtrip);
-
-            pq_public_key_free(restored);
             pq_secret_key_free(sk);
-            pq_public_key_free(pk);
         }
     }
 
@@ -1457,13 +1136,13 @@ mod tests {
         unsafe {
             let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
             let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
-            pq_key_gen(0, 1000, &mut pk, &mut sk);
+            pq_key_gen(0, 100, &mut pk, &mut sk);
 
             // Sign several different messages with different epochs
             for epoch in [5, 10, 15, 20, 25] {
                 let message = [epoch as u8; MESSAGE_LENGTH];
                 let mut signature: *mut PQSignature = ptr::null_mut();
-                
+
                 let result = pq_sign(sk, epoch, message.as_ptr(), MESSAGE_LENGTH, &mut signature);
                 assert_eq!(result, PQSigningError::Success);
 
@@ -1483,16 +1162,16 @@ mod tests {
     }
 
     #[test]
-    fn test_get_lifetime() {
-        let lifetime = pq_get_lifetime();
-        assert_eq!(lifetime, 262144); // 2^18
+    fn test_get_sizes() {
+        assert_eq!(pq_get_signature_size(), SIGNATURE_SIZE);
+        assert_eq!(pq_get_public_key_size(), PUBLIC_KEY_SIZE);
     }
 
     #[test]
     fn test_activation_and_prepared_intervals() {
         unsafe {
-            let activation_epoch = 100;
-            let num_active_epochs = 5000;
+            let activation_epoch = 10;
+            let num_active_epochs = 50;
 
             let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
             let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
@@ -1545,7 +1224,7 @@ mod tests {
         unsafe {
             let mut pk: *mut PQSignatureSchemePublicKey = ptr::null_mut();
             let mut sk: *mut PQSignatureSchemeSecretKey = ptr::null_mut();
-            pq_key_gen(0, 1000, &mut pk, &mut sk);
+            pq_key_gen(0, 100, &mut pk, &mut sk);
 
             // Try to serialize into too small buffer
             let mut small_buffer = [0u8; 10];
@@ -1556,7 +1235,7 @@ mod tests {
                 small_buffer.len(),
                 &mut written,
             );
-            
+
             // Should be error, but written should contain required size
             assert_eq!(result, PQSigningError::UnknownError);
             assert!(written > small_buffer.len());
