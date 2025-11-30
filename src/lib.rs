@@ -401,12 +401,10 @@ pub unsafe extern "C" fn pq_verify_ssz(
     }
 
     if pubkey_len != PUBLIC_KEY_SIZE {
-        eprintln!("[RUST pq_verify_ssz] ERROR: invalid pubkey length: {} (expected {})", pubkey_len, PUBLIC_KEY_SIZE);
         return -7;
     }
 
     if signature_len != SIGNATURE_SIZE {
-        eprintln!("[RUST pq_verify_ssz] ERROR: invalid signature length: {} (expected {})", signature_len, SIGNATURE_SIZE);
         return -8;
     }
 
@@ -422,7 +420,6 @@ pub unsafe extern "C" fn pq_verify_ssz(
     let message_array: &[u8; MESSAGE_LENGTH] = match msg_data.try_into() {
         Ok(arr) => arr,
         Err(_) => {
-            eprintln!("[RUST pq_verify_ssz] ERROR: message conversion failed");
             return -4;
         }
     };
@@ -430,8 +427,7 @@ pub unsafe extern "C" fn pq_verify_ssz(
     // Deserialize public key using leanSig's Serializable trait (SSZ format)
     let pk: PublicKeyType = match PublicKeyType::from_bytes(pk_data) {
         Ok(pk) => pk,
-        Err(e) => {
-            eprintln!("[RUST pq_verify_ssz] ERROR: pubkey decode failed: {:?}", e);
+        Err(_) => {
             return -5;
         }
     };
@@ -439,8 +435,7 @@ pub unsafe extern "C" fn pq_verify_ssz(
     // Deserialize signature using leanSig's Serializable trait (SSZ format)
     let sig: SignatureType = match SignatureType::from_bytes(sig_data) {
         Ok(sig) => sig,
-        Err(e) => {
-            eprintln!("[RUST pq_verify_ssz] ERROR: signature decode failed: {:?}", e);
+        Err(_) => {
             return -6;
         }
     };
@@ -771,36 +766,27 @@ pub unsafe extern "C" fn pq_secret_key_from_json(
     json_len: usize,
     sk_out: *mut *mut PQSignatureSchemeSecretKey,
 ) -> PQSigningError {
-    eprintln!("[RUST pq_secret_key_from_json] called with json_len={}", json_len);
-
     if json.is_null() || sk_out.is_null() || json_len == 0 {
-        eprintln!("[RUST pq_secret_key_from_json] ERROR: invalid pointer or zero length");
         return PQSigningError::InvalidPointer;
     }
 
     let json_slice = std::slice::from_raw_parts(json, json_len);
     let json_str = match std::str::from_utf8(json_slice) {
-        Ok(s) => {
-            eprintln!("[RUST pq_secret_key_from_json] UTF-8 conversion OK, first 200 chars: {}", &s[..std::cmp::min(200, s.len())]);
-            s
-        }
-        Err(e) => {
-            eprintln!("[RUST pq_secret_key_from_json] ERROR: UTF-8 conversion failed: {:?}", e);
+        Ok(s) => s,
+        Err(_) => {
             return PQSigningError::UnknownError;
         }
     };
 
     match serde_json::from_str::<SecretKeyType>(json_str) {
         Ok(sk) => {
-            eprintln!("[RUST pq_secret_key_from_json] JSON parse SUCCESS");
             let sk_wrapper = Box::new(PQSignatureSchemeSecretKeyInner {
                 inner: Box::new(sk),
             });
             *sk_out = Box::into_raw(sk_wrapper) as *mut PQSignatureSchemeSecretKey;
             PQSigningError::Success
         }
-        Err(e) => {
-            eprintln!("[RUST pq_secret_key_from_json] ERROR: JSON parse failed: {:?}", e);
+        Err(_) => {
             PQSigningError::UnknownError
         }
     }

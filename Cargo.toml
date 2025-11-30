@@ -12,7 +12,7 @@ signature-scheme-prod = []
 signature-scheme-test = []
 
 [dependencies]
-leansig = { git = "https://github.com/leanEthereum/leanSig.git", rev = "397e7cc9bf405d788bfd34cee9fe8b427a464074" }
+leansig = { git = "https://github.com/leanEthereum/leanSig.git", rev = "f10dcbefac2502d356d93f686e8b4ecd8dc8840a" }
 rand = "0.9"
 serde = "1"
 serde_json = "1"
